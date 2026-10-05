@@ -1,0 +1,95 @@
+#!/bin/sh
+# Install a previously signed and notarized suffix-free CLI bundle.
+# No signing, upload, credential access, or execution of the installed binary as root.
+set -eu
+umask 022
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+fail() { printf '%s\n' "$*" >&2; exit 2; }
+[ "$(uname -s)" = Darwin ] || fail 'Requires macOS.'
+[ "$(id -u)" -eq 0 ] || fail 'Run this installer through sudo.'
+[ "$#" -eq 2 ] || fail 'Usage: sh scripts/install-cli ABSOLUTE_BUNDLE EXPECTED_SIGNER_CERTIFICATE_SHA256'
+source_bundle=$1
+expected_certificate=$2
+case "$source_bundle" in /*) ;; *) fail 'Bundle path must be absolute.';; esac
+case "$expected_certificate" in *[!0-9a-f]*|'') fail 'Expected certificate must be lowercase SHA-256.';; esac
+[ "${#expected_certificate}" -eq 64 ] || fail 'Expected certificate must contain 64 hexadecimal characters.'
+[ -d "$source_bundle" ] && [ ! -L "$source_bundle" ] || fail 'Bundle must be a directory, not a symlink.'
+[ -f "$source_bundle/Contents/MacOS/yk" ] || fail 'Bundle has no yk executable.'
+
+# Every installation parent is root-owned and not writable by another user.
+# This deliberately rejects user-managed prefixes rather than silently taking ownership.
+check_directory() {
+  [ -d "$1" ] && [ ! -L "$1" ] || fail "Unsafe installation directory: $1"
+  [ "$(stat -f %u "$1")" -eq 0 ] || fail "Installation directory is not root-owned: $1"
+  case "$(ls -lde "$1" | awk '{print $1}')" in *+) fail "Installation directory has an ACL requiring review: $1";; esac
+  directory_mode=$(stat -f %Lp "$1")
+  [ "$((0$directory_mode & 022))" -eq 0 ] || fail "Installation directory is writable by another user: $1"
+}
+check_directory /usr
+if [ ! -e /usr/local ] && [ ! -L /usr/local ]; then mkdir /usr/local; fi
+check_directory /usr/local
+for directory in /usr/local/libexec; do
+  if [ ! -e "$directory" ] && [ ! -L "$directory" ]; then mkdir "$directory"; fi
+  check_directory "$directory"
+done
+# The PATH directory may belong to the invoking user. Only the symlink lives here.
+# The executable and its bundle remain protected in the root-owned libexec tree.
+if [ ! -e /usr/local/bin ] && [ ! -L /usr/local/bin ]; then mkdir /usr/local/bin; fi
+[ -d /usr/local/bin ] && [ ! -L /usr/local/bin ] || fail 'Unsafe /usr/local/bin directory.'
+bin_owner=$(stat -f %u /usr/local/bin)
+case "${SUDO_UID:-0}" in *[!0-9]*|'') fail 'Invalid invoking user ID.';; esac
+[ "$bin_owner" -eq 0 ] || [ "$bin_owner" -eq "${SUDO_UID:-0}" ] || fail '/usr/local/bin belongs to neither root nor the invoking user.'
+bin_mode=$(stat -f %Lp /usr/local/bin)
+[ "$((0$bin_mode & 022))" -eq 0 ] || fail '/usr/local/bin is group/world writable.'
+case "$(ls -lde /usr/local/bin | awk '{print $1}')" in *+) fail '/usr/local/bin has an ACL requiring review.';; esac
+if [ "$bin_owner" -ne 0 ]; then
+  printf 'The invoking user owns /usr/local/bin and can replace its command symlink. Package files remain root-owned.\n' >&2
+fi
+root=/usr/local/libexec/ykmacos
+if [ ! -e "$root" ] && [ ! -L "$root" ]; then mkdir "$root"; fi
+check_directory "$root"
+lock="$root/install.lock"
+mkdir "$lock" 2>/dev/null || fail 'Another install may be active. Inspect /usr/local/libexec/ykmacos/install.lock; no automatic lock removal.'
+stage=''
+finish() {
+  if [ -n "$stage" ] && [ -d "$stage" ]; then
+    printf 'Retained install evidence/staging directory: %s\n' "$stage" >&2
+  fi
+  rmdir "$lock" || :
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+command_path=/usr/local/bin/yk
+[ ! -e "$command_path" ] && [ ! -L "$command_path" ] || fail 'An existing /usr/local/bin/yk was found. Nothing was overwritten; upgrades require a separate reviewed workflow.'
+stage=$(mktemp -d "$root/stage.XXXXXX")
+chmod 700 "$stage"
+staged_bundle="$stage/ykmacos"
+# Copy once into a protected directory; only the protected copy is trusted below.
+ditto "$source_bundle" "$staged_bundle"
+[ -z "$(find "$staged_bundle" ! -type d ! -type f -print)" ] || fail 'Copied bundle contains symlinks or special files.'
+[ -f "$staged_bundle/Contents/embedded.provisionprofile" ] || fail 'Embedded provisioning profile is missing.'
+[ -f "$staged_bundle/Contents/Info.plist" ] || fail 'Info.plist is missing.'
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$staged_bundle/Contents/Info.plist")" = me.vespoli.ykmacos ] || fail 'Unexpected bundle identifier.'
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$staged_bundle/Contents/Info.plist")" = yk ] || fail 'Unexpected bundle executable.'
+codesign --verify --strict --verbose=2 "$staged_bundle"
+codesign --display --extract-certificates="$stage/signer-" "$staged_bundle"
+actual_certificate=$(shasum -a 256 "$stage/signer-0" | awk '{print $1}')
+[ "$actual_certificate" = "$expected_certificate" ] || fail 'Signer certificate differs from the explicitly pinned certificate.'
+spctl --assess --type execute --verbose=4 "$staged_bundle"
+binary_digest=$(shasum -a 256 "$staged_bundle/Contents/MacOS/yk" | awk '{print $1}')
+# Version directories never overwrite an earlier install. All contents are root-owned.
+version="$root/$binary_digest"
+[ ! -e "$version" ] && [ ! -L "$version" ] || fail 'This binary version already exists. Inspect it; no automatic overwrite or cleanup.'
+chmod -RN "$staged_bundle"
+chown -R -P 0:0 "$staged_bundle"
+find "$staged_bundle" -type d -exec chmod 755 {} +
+find "$staged_bundle" -type f -exec chmod 644 {} +
+chmod 755 "$staged_bundle/Contents/MacOS/yk"
+codesign --verify --strict "$staged_bundle"
+mv "$staged_bundle" "$version"
+# ln refuses an existing destination, including a dangling symlink.
+ln -s "$version/Contents/MacOS/yk" "$command_path" || fail 'Command publication failed. Verified version retained; no existing command was replaced.'
+printf 'Installed: %s\nBinary SHA-256: %s\nSigner certificate SHA-256: %s\n' "$command_path" "$binary_digest" "$actual_certificate"
+printf 'Run the CLI and Keychain status verification as your normal user, without sudo.\n'

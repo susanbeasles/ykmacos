@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+if [ "$#" -ne 3 ]; then
+  echo 'Usage: ./scripts/sep-developer-csr KEY_TAG COMMON_NAME OUTPUT.csr' >&2
+  exit 2
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/ykmacos-sep-csr.XXXXXX")
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+/usr/bin/xcrun swiftc "$root/tools/sep-csr/SEPDeveloperCSR.swift" \
+  "$root/tools/sep-csr/GenerateSEPDeveloperCSR.swift" \
+  -framework Security -o "$build_dir/sep-developer-csr"
+"$build_dir/sep-developer-csr" "$1" "$2" "$3"

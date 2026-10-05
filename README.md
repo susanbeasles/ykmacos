@@ -17,3 +17,7 @@ Build on macOS 27+ with Swift 6:
 `doctor` returns exit code 2 until native readiness probes exist. No command changes hardware or host configuration. Unsupported commands fail explicitly.
 
 See [V1 decisions](docs/v1-decisions.md), [provisioning contract](docs/provisioning.md), and [Mac validation](docs/mac-validation.md).
+
+## Discovery preview update
+
+Native source now queries public identity references from file-based and Data Protection Keychains and lists CryptoTokenKit tokens. Authentication UI is disabled. This native code has not been compiled or hardware-tested in the Linux creation environment. Signing eligibility and device provisioning remain pending. Run the Mac validation procedure before relying on its inventory.

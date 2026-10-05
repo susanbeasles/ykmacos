@@ -1,0 +1,77 @@
+#!/bin/sh
+# Experimental profile discovery without an .app suffix. Never installs.
+set -eu
+umask 077
+cd "$(dirname "$0")/.."
+test -f Package.swift
+[ "$(uname -s)" = Darwin ] || { echo 'Requires macOS.' >&2; exit 2; }
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo 'Usage: sh scripts/probe-cli-packaging /absolute/profile.provisionprofile [NEW_ABSOLUTE_OUTPUT_DIRECTORY]' >&2; exit 2; }
+profile=$1
+case "$profile" in /*) ;; *) echo 'Profile must have an absolute path.' >&2; exit 2;; esac
+[ -f "$profile" ] && [ ! -L "$profile" ] || { echo 'Profile must be a regular file, not a symlink.' >&2; exit 2; }
+expected_profile=b5281158f9aaa13983f1aafcc1a19fd653d8b37b6313510e0a8f31f92afecc55
+actual_profile=$(/usr/bin/shasum -a 256 "$profile" | /usr/bin/awk '{print $1}')
+[ "$actual_profile" = "$expected_profile" ] || { echo 'Profile differs from the reviewed YKMacOS Developer ID profile. Stop for review.' >&2; exit 2; }
+/usr/bin/swift build -c release
+bin_dir=$(/usr/bin/swift build -c release --show-bin-path)
+mkdir -p .build/packaging-probes
+if [ "$#" -eq 2 ]; then
+  probe=$2
+  case "$probe" in /*) ;; *) echo 'Output directory must have an absolute path.' >&2; exit 2;; esac
+  # mkdir fails on existing files, directories and symlinks before any signing request.
+  mkdir "$probe"
+else
+  probe=$(/usr/bin/mktemp -d "$PWD/.build/packaging-probes/run.XXXXXX")
+fi
+bundle="$probe/ykmacos"
+mkdir -p "$bundle/Contents/MacOS"
+/usr/bin/ditto "$bin_dir/yk" "$bundle/Contents/MacOS/yk"
+/usr/bin/ditto "$profile" "$bundle/Contents/embedded.provisionprofile"
+# Verify the retained copy too, before any signing request.
+[ "$(/usr/bin/shasum -a 256 "$bundle/Contents/embedded.provisionprofile" | /usr/bin/awk '{print $1}')" = "$expected_profile" ]
+cat > "$bundle/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>me.vespoli.ykmacos</string>
+<key>CFBundleExecutable</key><string>yk</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleName</key><string>YKMacOS</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>LSMinimumSystemVersion</key><string>27.0</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+PLIST
+cat > "$probe/entitlements.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.application-identifier</key><string>2VB7966G7R.me.vespoli.ykmacos</string>
+<key>com.apple.developer.team-identifier</key><string>2VB7966G7R</string>
+<key>keychain-access-groups</key><array><string>2VB7966G7R.me.vespoli.ykmacos</string></array>
+</dict></plist>
+PLIST
+/usr/bin/plutil -lint "$bundle/Contents/Info.plist" "$probe/entitlements.plist"
+echo 'One production signing request follows; macOS/YubiKey may request PIN and touch. No automatic retry.' >&2
+/usr/bin/codesign --force --sign 'Developer ID Application: Anthony Vespoli (2VB7966G7R)' \
+  --identifier me.vespoli.ykmacos --options runtime --timestamp \
+  --entitlements "$probe/entitlements.plist" "$bundle"
+/usr/bin/codesign --verify --strict --verbose=2 "$bundle"
+/usr/bin/codesign --display --extract-certificates="$probe/signer-" "$bundle"
+actual_certificate=$(/usr/bin/shasum -a 256 "$probe/signer-0" | /usr/bin/awk '{print $1}')
+[ "$actual_certificate" = 66900e7a3b73c9d54c099879506a9794c3e87f5b2342a40f4a01a12adc9ce4b7 ] || {
+  echo 'Signed certificate does not match the reviewed YubiKey certificate. Do not execute this artifact.' >&2; exit 2;
+}
+/usr/bin/codesign --display --entitlements - "$bundle"
+# This is a public metadata write, not a token signing or PIN operation.
+# Success is a local packaging test only: notarization and distribution remain pending.
+"$bundle/Contents/MacOS/yk" signers accept \
+  --certificate 66900e7a3b73c9d54c099879506a9794c3e87f5b2342a40f4a01a12adc9ce4b7 \
+  --token com.apple.pivtoken:12B7702B3E72411DB46DCAA62BEB19CA \
+  --team 2VB7966G7R \
+  --receipt "$PWD/personal-signer.receipt.json" \
+  --policy "$PWD/personal-signer.policy.json" \
+  --policy-digest 7be0a4194e79c422705376ee2252c5bb4456e5d779bef4592a71dcdb1b831338 --json
+printf 'Local profile-discovery probe passed: %s\n' "$bundle/Contents/MacOS/yk"
+printf 'Not notarized or installed. This experiment does not establish distribution support.\n'

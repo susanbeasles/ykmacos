@@ -5,6 +5,7 @@ let package = Package(name: "ykmacos", platforms: [.macOS("27.0")], products: [
     .executable(name: "yk", targets: ["yk"])
 ], targets: [
     .target(name: "YKCore"),
-    .executableTarget(name: "yk", dependencies: ["YKCore"]),
+    .target(name: "YKAppleSecurity", dependencies: ["YKCore"]),
+    .executableTarget(name: "yk", dependencies: ["YKCore", "YKAppleSecurity"]),
     .testTarget(name: "YKCoreTests", dependencies: ["YKCore"])
 ])

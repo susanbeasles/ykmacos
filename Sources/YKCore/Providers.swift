@@ -1,6 +1,6 @@
 import Foundation
 public enum HardwareCapability: String, Codable, Sendable { case piv, fido2, oath, openpgp, otp, secureEnclave }
-public enum KeyOrigin: String, Codable, Sendable { case attestedGenerated, imported, unverifiable }
+public enum KeyOrigin: String, Codable, Sendable, Hashable { case attestedGenerated, imported, unverifiable }
 public struct DeviceInventory: Codable, Sendable {
     public let providerID: String
     public let deviceID: String
