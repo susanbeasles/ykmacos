@@ -3,7 +3,7 @@
 No native or hardware tests have been run for this preview. The creation environment is Linux without Swift.
 
 1. Run scripts/check with Swift 6 on macOS 27+.
-2. Confirm doctor reports native probes pending and performs no mutations.
+2. Run `yk doctor --team 2VB7966G7R --json`; confirm actual runtime, Secure Enclave availability, connected-token/identity counts, offline certificate candidates and explicit blockers. Doctor suppresses authentication UI and performs no mutations.
 3. Implement and test token-aware public identity discovery, including the existing personal/employer identities. Never infer failure from security find-identity alone.
 4. Validate effective production entitlements and SEP/Keychain access; investigate -34018 without software fallback.
 5. Validate USB YubiKey 5 model, firmware and capability discovery without changing credentials.
@@ -44,3 +44,20 @@ References: [Apple Certificate OIDs](https://developer.apple.com/documentation/s
 ## Subject OU correction
 
 OU extraction now reads the normalized DER subject Name using attribute OID 2.5.4.11. It does not parse the common name or localized certificate display labels. The reader is bounded, rejects indefinite/truncated encodings, and preserves duplicate OU values so ambiguity cannot silently disappear. Unsupported or malformed subject encoding leaves OU verification unavailable, never inferred from the certificate's display name.
+
+## October 7 native qualification
+
+`./scripts/check` passes 43 tests on the operator's arm64 Mac, including two
+readiness checks for disconnected token identities and incomplete Keychain
+inventories. The real doctor flow observes Secure Enclave availability, three
+CryptoTokenKit token identifiers, two token-associated identities, and one
+offline certificate candidate for personal Team ID `2VB7966G7R`. Counts do not
+establish USB model/firmware, hardware attestation, possession, fresh revocation
+or authorization. No private-key operation or credential mutation was performed.
+
+The Mac reports 26.6.2, below the existing macOS 27+ target. Doctor exits 2 and
+reports `macos-27-required`; this change does not lower the platform requirement.
+Use a supported Mac for release qualification. Generic doctor output omits token
+IDs, certificate fingerprints and subjects; explicit identity inventory remains
+the selection interface. Keychain query errors make inventory incomplete and
+block readiness rather than triggering repair.
