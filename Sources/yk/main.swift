@@ -19,7 +19,7 @@ case "--help", "help":
     print("""
     yk — macOS YubiKey/SEP bridge (foundation preview)
     Usage:
-      yk doctor [--json]       Report runtime readiness without changing state
+      yk doctor [--team TEAM] [--json]  Probe native readiness without changing state
       yk capabilities --json  Report implemented and pending capabilities
       yk identities list --json  Inspect public identity references without approval
       yk identities check --certificate SHA256 --token TOKEN --team TEAM --json
@@ -37,7 +37,8 @@ case "--help", "help":
       yk recovery plan --inventory ABSOLUTE_PATH --remove-device DEVICE_ID --json
       yk tokens list --json      List available CryptoTokenKit token identifiers
       yk --help               Show help
-    Provisioning, signing, and encryption are pending; no device changes occur.
+    Doctor and inventory queries are read-only. SEP creation and signer enrollment
+    require explicit commands; signing authorization and encryption remain pending.
     """)
 case "sep":
     let action = arguments.dropFirst().first ?? ""
@@ -228,21 +229,26 @@ case "tokens" where arguments.dropFirst().first == "list":
     #endif
 case "capabilities":
     try emit(["schemaVersion": "1", "release": "foundation-preview",
-              "implemented": "runtime-diagnostics,public-identity-query,certificate-checks,token-query,identity-possession,public-receipts,initial-signer-enrollment,sealed-signer-policy-verification,local-policy-acceptance,sep-key-generation,sep-key-inspection,sep-csr-generation,recovery-coverage-reporting,device-removal-planning,provider-contracts,provisioning-state-machine",
+              "implemented": "native-readiness-probes,runtime-diagnostics,public-identity-query,certificate-checks,token-query,identity-possession,public-receipts,initial-signer-enrollment,sealed-signer-policy-verification,local-policy-acceptance,sep-key-generation,sep-key-inspection,sep-csr-generation,recovery-coverage-reporting,device-removal-planning,provider-contracts,provisioning-state-machine",
               "pending": "native-device-discovery,hardware-attestation,policy-revision-anchor,operation-authorization,init,application-signing,git,encryption,secrets,recovery-storage",
               "scope": "V1-local; remote-broker is V2"])
 case "doctor":
-    #if os(macOS)
-    let report = Diagnostic(code: "YK_NATIVE_PROVIDER_PENDING", operation: "doctor", stage: "runtime",
-        message: "macOS runtime detected. Hardware and entitlement probes are not implemented.",
-        changed: false, retrySafe: true, nextAction: "Follow docs/mac-validation.md; do not infer device readiness.")
-    #else
-    let report = Diagnostic(code: "YK_PLATFORM_UNSUPPORTED", operation: "doctor", stage: "runtime",
-        message: "Native operations require macOS 27 or later.", changed: false, retrySafe: true,
-        nextAction: "Build and validate on a supported Mac.")
-    #endif
+    var team: String?
+    var cursor = 1
+    while cursor < arguments.count {
+        if arguments[cursor] == "--json" { cursor += 1; continue }
+        guard arguments[cursor] == "--team", team == nil, cursor + 1 < arguments.count,
+              arguments[cursor + 1].count == 10,
+              arguments[cursor + 1].allSatisfy({ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".contains($0) }) else {
+            try emit(Diagnostic(code: "YK_INVALID_SELECTION", operation: "doctor", stage: "input",
+                message: "Supply only --json and an optional ten-character --team value.",
+                changed: false, retrySafe: true, nextAction: "Run yk --help.")); exit(2)
+        }
+        team = arguments[cursor + 1]; cursor += 2
+    }
+    let report = NativeReadiness.inspect(expectedTeamID: team)
     try emit(report)
-    exit(2)
+    exit(report.blockers.isEmpty ? 0 : 2)
 default:
     try emit(Diagnostic(code: "YK_COMMAND_UNAVAILABLE", operation: "cli", stage: "dispatch",
         message: "Command is unknown or not implemented in this preview.", changed: false,
